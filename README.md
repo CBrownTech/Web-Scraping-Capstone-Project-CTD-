@@ -1,4 +1,4 @@
-# Web Scraping Capstone Project
+# Web Scraping Capstone Project (Code The Dream)
 
 Capstone project for scraping global weather data from [Weather Around The World](https://www.timeanddate.com/weather/), storing it in SQLite, and building an interactive Streamlit dashboard.
 
