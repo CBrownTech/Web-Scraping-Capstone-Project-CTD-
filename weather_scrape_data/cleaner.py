@@ -64,23 +64,42 @@ def normalize_weather_condition(condition_raw: str) -> str:
     return condition
 
 
-def clean_weather_data(
-    raw_records: list[dict[str, str]],
-    scraped_at: datetime | None = None,
-) -> pd.DataFrame:
-    """Transform raw scrape records into a cleaned, analysis-ready DataFrame."""
-    if scraped_at is None:
-        scraped_at = datetime.now(timezone.utc)
+def raw_records_to_dataframe(raw_records: list[dict[str, str]]) -> pd.DataFrame:
+    """Load scraped records into a Pandas DataFrame."""
+    return pd.DataFrame(raw_records)
 
+
+def summarize_dataframe(df: pd.DataFrame, label: str) -> None:
+    """Print shape, missing values, and a sample for a cleaning stage."""
+    print(f"\n--- {label} ---")
+    print(f"Rows: {len(df)}, Columns: {len(df.columns)}")
+    if df.empty:
+        print("(empty)")
+        return
+
+    missing = df.isna().sum()
+    missing = missing[missing > 0]
+    if not missing.empty:
+        print("Missing values per column:")
+        print(missing.to_string())
+    else:
+        print("Missing values: none")
+
+    print("\nSample:")
+    print(df.head(3).to_string(index=False))
+
+
+def _transform_records(raw_df: pd.DataFrame, scraped_at: datetime) -> pd.DataFrame:
+    """Apply parsing and column transformations to raw scrape fields."""
     cleaned_rows: list[dict[str, object]] = []
 
-    for record in raw_records:
-        city, is_capital = parse_city_name(record.get("city_raw", ""))
+    for record in raw_df.to_dict(orient="records"):
+        city, is_capital = parse_city_name(str(record.get("city_raw", "")))
         day_of_week, clock_time, local_time = parse_local_time(
-            record.get("local_time_raw", "")
+            str(record.get("local_time_raw", ""))
         )
-        temp_f, temp_c = parse_temperature(record.get("temperature_raw", ""))
-        weather_url = record.get("weather_url", "")
+        temp_f, temp_c = parse_temperature(str(record.get("temperature_raw", "")))
+        weather_url = str(record.get("weather_url", ""))
 
         cleaned_rows.append(
             {
@@ -91,7 +110,7 @@ def clean_weather_data(
                 "day_of_week": day_of_week,
                 "time": clock_time,
                 "weather_condition": normalize_weather_condition(
-                    record.get("weather_condition_raw", "")
+                    str(record.get("weather_condition_raw", ""))
                 ),
                 "temperature_f": temp_f,
                 "temperature_c": temp_c,
@@ -100,8 +119,76 @@ def clean_weather_data(
             }
         )
 
-    df = pd.DataFrame(cleaned_rows)
-    df = df.drop_duplicates(subset=["city", "country", "weather_url"])
-    df = df.dropna(subset=["city", "temperature_f"])
-    df = df.sort_values(["country", "city"]).reset_index(drop=True)
-    return df
+    return pd.DataFrame(cleaned_rows)
+
+
+def clean_weather_data(
+    raw_records: list[dict[str, str]] | pd.DataFrame,
+    scraped_at: datetime | None = None,
+    *,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Transform raw scrape records into a cleaned, analysis-ready DataFrame."""
+    if scraped_at is None:
+        scraped_at = datetime.now(timezone.utc)
+
+    raw_df = (
+        raw_records
+        if isinstance(raw_records, pd.DataFrame)
+        else raw_records_to_dataframe(raw_records)
+    )
+
+    if verbose:
+        summarize_dataframe(raw_df, "BEFORE CLEANING (raw scrape)")
+
+    transformed_df = _transform_records(raw_df, scraped_at)
+    rows_after_transform = len(transformed_df)
+
+    duplicate_mask = transformed_df.duplicated(
+        subset=["city", "country", "weather_url"], keep="first"
+    )
+    duplicates_removed = int(duplicate_mask.sum())
+
+    missing_required_mask = (
+        transformed_df["city"].isna()
+        | (transformed_df["city"].astype(str).str.strip() == "")
+        | transformed_df["temperature_f"].isna()
+    )
+    rows_dropped_missing = int(missing_required_mask.sum())
+
+    cleaned_df = transformed_df.drop_duplicates(
+        subset=["city", "country", "weather_url"]
+    )
+    cleaned_df = cleaned_df.dropna(subset=["city", "temperature_f"])
+    cleaned_df = cleaned_df[
+        cleaned_df["city"].astype(str).str.strip() != ""
+    ]
+    cleaned_df = cleaned_df.sort_values(["country", "city"]).reset_index(drop=True)
+
+    if verbose:
+        summarize_dataframe(cleaned_df, "AFTER CLEANING")
+        print("\n--- CLEANING SUMMARY ---")
+        print(f"Raw rows scraped:        {len(raw_df)}")
+        print(f"Rows after transform:    {rows_after_transform}")
+        print(f"Duplicate rows removed:  {duplicates_removed}")
+        print(f"Rows dropped (missing):  {rows_dropped_missing}")
+        print(f"Final rows kept:         {len(cleaned_df)}")
+
+        print("\n--- GROUPING: average temperature (F) by country ---")
+        country_summary = (
+            cleaned_df.groupby("country", dropna=False)["temperature_f"]
+            .agg(avg_temp_f="mean", city_count="count")
+            .round(1)
+            .sort_values("avg_temp_f", ascending=False)
+        )
+        print(country_summary.head(10).to_string())
+
+        print("\n--- FILTER: capital cities only (first 5) ---")
+        capitals = cleaned_df[cleaned_df["is_capital"]].head(5)
+        print(
+            capitals[
+                ["city", "country", "temperature_f", "weather_condition"]
+            ].to_string(index=False)
+        )
+
+    return cleaned_df
